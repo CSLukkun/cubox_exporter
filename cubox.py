@@ -290,7 +290,7 @@ def main():
             # 写入每篇文章的总结
             for idx, summary in enumerate(summaries, 1):
                 f.write(f"## {idx}. {summary['title']}\n")
-                f.write(f"创建时间: {summary['create_time']}\n\n")
+                # f.write(f"创建时间: {summary['create_time']}\n\n")
                 f.write(f"{summary['summary']}\n\n")
                 f.write("---\n\n")  # 分隔线
         
