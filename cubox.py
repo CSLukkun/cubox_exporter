@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from dateutil import parser
 
 import re
+import openai
+from openai import OpenAI
 
 class CuboxExporter:
     def __init__(self, token: str):
@@ -36,23 +38,28 @@ class CuboxExporter:
             
         return response.json()
 
-    def export_engine(self, engine_id: str) -> Dict:
-        """导出特定ID的内容"""
+    def export_engine(self, engine_id: str, export_type: str = 'html') -> Dict:
+        """
+        导出特定ID的内容
+        Args:
+            engine_id: 要导出的内容ID
+            export_type: 导出类型，可选 'html', 'text' 或 'md'（markdown格式）
+        """
         url = f"{self.base_url}/search_engines/export"
         
         # 更新headers
         headers = {
             'authorization': self.token,
             'content-type': 'application/x-www-form-urlencoded',
-            'accept': 'text/html,application/json',  # 接受HTML和JSON响应
+            'accept': 'application/json, text/plain, */*',
             'origin': 'https://cubox.pro',
-            'referer': f'https://cubox.pro/my/card?id={engine_id}'
+            'referer': f'https://cubox.pro/my/inbox'
         }
         
         # 构建form数据
         data = {
             'engineIds': engine_id,
-            'type': 'html',
+            'type': export_type,  # 'html', 'text' 或 'md'
             'snap': 'false',
             'compressed': 'false'
         }
@@ -66,10 +73,9 @@ class CuboxExporter:
             content_type = response.headers.get('content-type', '')
             if 'application/json' in content_type:
                 return response.json()
-            elif 'text/html' in content_type:
-                # 保存HTML内容
+            elif 'text/html' in content_type or 'text/plain' in content_type:
                 return {
-                    'content_type': 'html',
+                    'content_type': 'html' if export_type == 'html' else 'markdown',
                     'content': response.text,
                     'status': 'success'
                 }
@@ -81,6 +87,75 @@ class CuboxExporter:
                 }
         else:
             raise Exception(f"导出内容失败: {response.status_code}, {response.text[:100]}")
+
+    def get_tag_list(self) -> Dict:
+        """获取标签列表"""
+        url = f"{self.base_url}/v2/tag/list"
+        
+        headers = {
+            'authorization': self.token,
+            'accept': 'application/json, text/plain, */*',
+            'referer': 'https://cubox.pro/my/inbox',
+            'origin': 'https://cubox.pro'
+        }
+        
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"获取标签列表失败: {response.status_code}")
+        
+        return response.json()
+
+    def summarize_content(self, content: str, client: OpenAI) -> str:
+        """
+        使用 DeepSeek API 对内容进行总结
+        Args:
+            content: 需要总结的内容
+            client: OpenAI 客户端实例
+        Returns:
+            str: 总结后的内容
+        """
+        try:
+            prompt = f"""请对以下内容进行简要总结，包含主要观点和关键信息：
+
+{content}
+
+请用中文总结，控制在300字以内。"""
+
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "你是一个专业的文章总结助手，善于提取文章重点，并进行清晰的总结。"},
+                    {"role": "user", "content": prompt},
+                ],
+                stream=False
+            )
+            
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"总结生成失败: {e}")
+            return "内容总结失败"
+
+    def export_and_summarize(self, engine_id: str, client: OpenAI, export_type: str = 'md') -> Dict:
+        """
+        导出内容并生成总结
+        Args:
+            engine_id: 要导出的内容ID
+            client: OpenAI 客户端实例
+            export_type: 导出类型
+        """
+        # 先导出内容
+        export_data = self.export_engine(engine_id, export_type)
+        
+        # 获取内容
+        content = export_data.get('content', '')
+        
+        # 生成总结
+        summary = self.summarize_content(content, client)
+        
+        # 将总结添加到导出数据中
+        export_data['summary'] = summary
+        
+        return export_data
 
 def parse_custom_time(time_str: str) -> datetime:
     """解析自定义格式的时间字符串"""
@@ -107,11 +182,25 @@ def is_within_week(time_str: str) -> bool:
 
 def main():
     import os
+    import dotenv
+    from openai import OpenAI
+    from datetime import datetime
+    
     dotenv.load_dotenv()
     
     # 配置
-    TOKEN = os.getenv("CUBOX_TOKEN") # 替换为你的token
+    TOKEN = os.getenv("CUBOX_TOKEN")
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
     OUTPUT_DIR = "cubox_exports"
+    
+    # 获取当前日期作为文件名
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    
+    # 初始化 DeepSeek 客户端
+    client = OpenAI(
+        api_key=DEEPSEEK_API_KEY,
+        base_url="https://api.deepseek.com"
+    )
     
     # 创建导出器实例
     exporter = CuboxExporter(TOKEN)
@@ -146,7 +235,7 @@ def main():
                 all_items.extend(current_items)
                 print(f"已获取第 {page} 页，共 {len(current_items)} 条内容")
             
-            # 如果最后一个item超过一周，结束循环
+            # 如果最后一个item超过���周，结束循环
             if not is_within_week(create_time):
                 print("已获取到一周前的内容，停止获取")
                 break
@@ -154,59 +243,61 @@ def main():
             page += 1
             time.sleep(2)  # 避免请求过快
         
-        print(f"共获取到 {len(all_items)} 条���周内的内容")
+        print(f"共获取到 {len(all_items)} 条周内的内容")
         
-        # 2. 导出每个内容
-        print("\n开始导出内容...")
-        exports = []
+        # 用于存储所有文章的总结
+        summaries = []
         
+        # 导出内容部分的更新
         for item in all_items:
             engine_id = item.get('userSearchEngineID')
             title = item.get('title', 'untitled')
+            create_time = item.get('createTime', '')
             
             if not engine_id:
                 print(f"警告: 跳过无效的ID项: {title}")
                 continue
                 
-            print(f"正在导出: {title} (ID: {engine_id})")
+            print(f"正在导出并总结: {title} (ID: {engine_id})")
             try:
-                export_data = exporter.export_engine(str(engine_id))
+                export_data = exporter.export_and_summarize(str(engine_id), client, 'md')
                 
-                # 根据内容类型保存到不同文件
-                if export_data.get('content_type') == 'html':
-                    # 保存HTML到单独的文件
-                    html_filename = f"{OUTPUT_DIR}/{engine_id}.html"
-                    with open(html_filename, 'w', encoding='utf-8') as f:
-                        f.write(export_data['content'])
-                    # 在exports中只保存引用
-                    export_data['content'] = f"Saved to {html_filename}"
-                    
-                exports.append({
-                    'id': engine_id,
+                # 将总结添加到列表中
+                summary_entry = {
                     'title': title,
-                    'data': export_data
-                })
-                time.sleep(1)
+                    'create_time': create_time,
+                    'summary': export_data['summary']
+                }
+                summaries.append(summary_entry)
+                
+                time.sleep(1)  # 避免请求过快
             except Exception as e:
-                print(f"导出失败: {e}")
+                print(f"导出或总结失败: {e}")
         
-        # 3. 保存结果
-        import os
+        # 创建输出目录
         if not os.path.exists(OUTPUT_DIR):
             os.makedirs(OUTPUT_DIR)
+        
+        # 生成汇总的 Markdown 文件
+        summary_file = f"{OUTPUT_DIR}/summary_{current_date}.md"
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            # 写入标题
+            f.write(f"# Cubox 文章总结 ({current_date})\n\n")
             
-        # 保存导出记录
-        with open(f"{OUTPUT_DIR}/export_records.json", 'w', encoding='utf-8') as f:
-            json.dump({
-                'total_items': len(all_items),
-                'successful_exports': len(exports),
-                'exports': exports
-            }, f, ensure_ascii=False, indent=2)
+            # 按时间排序
+            summaries.sort(key=lambda x: x['create_time'], reverse=True)
             
-        print(f"\n导出完成！")
+            # 写入每篇文章的总结
+            for idx, summary in enumerate(summaries, 1):
+                f.write(f"## {idx}. {summary['title']}\n")
+                f.write(f"创建时间: {summary['create_time']}\n\n")
+                f.write(f"{summary['summary']}\n\n")
+                f.write("---\n\n")  # 分隔线
+        
+        print(f"\n总结完成！")
         print(f"总共处理: {len(all_items)} 项")
-        print(f"成功导出: {len(exports)} 项")
-        print(f"结果保存在: {OUTPUT_DIR}")
+        print(f"成功总结: {len(summaries)} 项")
+        print(f"汇总文件保存在: {summary_file}")
         
     except Exception as e:
         print(f"发生错误: {e}")
