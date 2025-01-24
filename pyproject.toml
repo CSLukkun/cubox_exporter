@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "ai-news-agent"
+name = "cubox_exporter"
 version = "0.1.0"
 description = ""
 authors = ["lukkun <yzww1999@outlook.com>"]
